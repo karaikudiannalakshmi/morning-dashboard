@@ -47,7 +47,7 @@ function Card({ title, sub, badge, badgeType, children, error }) {
   )
 }
 
-// ── KAL PAYROLL ──
+// ── KAL PAYROLL SETTLEMENT ──
 function KalCard() {
   const [data, setData] = useState(null)
   const [err, setErr] = useState(null)
@@ -60,91 +60,86 @@ function KalCard() {
       const d = snap.val()
       if (!d) { setErr('No data at /kal'); setLoading(false); return }
 
+      const yr = today.getFullYear()
+      const mo = today.getMonth() + 1
+      const daysInMonth = new Date(yr, mo, 0).getDate()
+
       const emps = d.emps ? Object.values(d.emps).filter(Boolean) : []
+
+      // Attendance: count present days this month per emp
+      const attNode = d.att ? (d.att[yr] ? (d.att[yr][mo] || {}) : {}) : {}
+      const daysByEmp = {}
+      Object.values(attNode).forEach(dayData => {
+        if (typeof dayData === 'object') {
+          Object.entries(dayData).forEach(([empId, val]) => {
+            if (val === 1 || val === 'P' || val === true)
+              daysByEmp[empId] = (daysByEmp[empId] || 0) + 1
+          })
+        }
+      })
+
+      // OT: company OT and party OT per emp this month
+      const coyOtByEmp = {}
+      const partyOtByEmp = {}
+      if (d.otime) {
+        Object.values(d.otime).filter(Boolean).forEach(ot => {
+          if (!ot.empId) return
+          const otMo = ot.month || ot.mon
+          if (otMo && Number(otMo) !== mo) return
+          if (ot.type === 'company' || ot.type === 'coy') coyOtByEmp[ot.empId] = (coyOtByEmp[ot.empId] || 0) + (ot.amount || ot.hrs || 0)
+          if (ot.type === 'party') partyOtByEmp[ot.empId] = (partyOtByEmp[ot.empId] || 0) + (ot.amount || ot.hrs || 0)
+        })
+      }
+
+      // Advances this month
+      const advs = d.adv ? Object.values(d.adv).filter(Boolean) : []
+      const advByEmp = {}
+      advs.forEach(a => {
+        if (!a.empId) return
+        const aMo = a.month || a.mon
+        if (aMo && Number(aMo) !== mo) return
+        advByEmp[a.empId] = (advByEmp[a.empId] || 0) + (a.amount || 0)
+      })
+
+      // Loans deduction this month
       const loans = d.loan ? Object.values(d.loan).filter(Boolean) : []
-      const advs  = d.adv  ? Object.values(d.adv).filter(Boolean)  : []
-      const activeLoans = loans.filter(l => (l.balance || l.remaining || l.amount || 0) > 0)
-      const activeAdv   = advs.filter(a => (a.amount || 0) > 0)
-      const otCount = d.otime ? Object.keys(d.otime).length : 0
-
       const loanByEmp = {}
-      loans.forEach(l => { if (l.empId) loanByEmp[l.empId] = (loanByEmp[l.empId] || 0) + (l.balance || l.remaining || l.amount || 0) })
-      const advByEmp = {}
-      advs.forEach(a => { if (a.empId) advByEmp[a.empId] = (advByEmp[a.empId] || 0) + (a.amount || 0) })
+      loans.forEach(l => {
+        if (!l.empId) return
+        loanByEmp[l.empId] = (loanByEmp[l.empId] || 0) + (l.emi || l.deduction || 0)
+      })
 
-      setData({ emps, activeLoans, activeAdv, otCount, loanByEmp, advByEmp })
-    } catch (e) { setErr(e.message) }
-    setLoading(false)
-  }, [])
+      // Conveyance
+      const convByEmp = {}
+      if (d.conv) {
+        Object.values(d.conv).filter(Boolean).forEach(c => {
+          if (c.empId) convByEmp[c.empId] = (convByEmp[c.empId] || 0) + (c.amount || 0)
+        })
+      }
 
-  useEffect(() => { load() }, [load])
+      // Build settlement rows
+      const rows = emps.map(e => {
+        const eid = e.id || e.empId || ''
+        const days = daysByEmp[eid] || 0
+        const baseSal = e.type === 'fixed' ? (e.salary || 0) :
+          e.type === 'monthly' ? Math.round((e.salary || 0) * days / daysInMonth) :
+          e.type === 'cooking' ? Math.round((e.salary || 0) * days / daysInMonth) :
+          Math.round((e.salary || 0) * days / daysInMonth)
+        const coyOt = coyOtByEmp[eid] || 0
+        const partyOt = partyOtByEmp[eid] || 0
+        const conv = convByEmp[eid] || 0
+        const gross = baseSal + coyOt + partyOt + conv
+        const adv = advByEmp[eid] || 0
+        const loanDed = loanByEmp[eid] || 0
+        const netPay = gross - adv - loanDed
+        return { name: e.name || eid, type: e.type || '—', days, baseSal, coyOt, partyOt, conv, gross, adv, loanDed, netPay }
+      })
 
-  const empCount = data?.emps?.length || 0
-  return (
-    <Card
-      title="KAL Payroll" sub="koviloor-payroll · Realtime DB"
-      badge={loading ? 'Loading…' : err ? 'Error' : empCount + ' staff'}
-      badgeType={loading ? 'info' : err ? 'err' : 'ok'}
-      error={err}
-    >
-      <div className="metrics">
-        <Metric label="Employees"      value={loading ? '…' : empCount} />
-        <Metric label="Active loans"   value={loading ? '…' : data?.activeLoans?.length ?? '—'} />
-        <Metric label="Active advances" value={loading ? '…' : data?.activeAdv?.length ?? '—'} />
-        <Metric label="OT entries"     value={loading ? '…' : data?.otCount ?? '—'} />
-      </div>
-      <div className="table-wrap">
-        <table>
-          <thead><tr><th>Employee</th><th>Type</th><th>Loan bal</th><th>Advance bal</th></tr></thead>
-          <tbody>
-            {loading && <tr className="info-row"><td colSpan={4}>Fetching…</td></tr>}
-            {!loading && !err && data?.emps?.slice(0, 15).map((e, i) => {
-              const lb = data.loanByEmp[e.id || e.empId] || 0
-              const ab = data.advByEmp[e.id || e.empId] || 0
-              return (
-                <tr key={i}>
-                  <td><span className={`dot ${lb > 0 || ab > 0 ? 'dot-amber' : 'dot-green'}`}></span>{e.name || e.id || '—'}</td>
-                  <td>{e.type || '—'}</td>
-                  <td>{lb > 0 ? INR(lb) : '—'}</td>
-                  <td>{ab > 0 ? INR(ab) : '—'}</td>
-                </tr>
-              )
-            })}
-          </tbody>
-        </table>
-      </div>
-    </Card>
-  )
-}
+      const totalGross = rows.reduce((s, r) => s + r.gross, 0)
+      const totalNet = rows.reduce((s, r) => s + r.netPay, 0)
+      const totalAdv = rows.reduce((s, r) => s + r.adv, 0)
 
-// ── KASI PAYROLL ──
-function KasiCard() {
-  const [data, setData] = useState(null)
-  const [err, setErr] = useState(null)
-  const [loading, setLoading] = useState(true)
-
-  const load = useCallback(async () => {
-    setLoading(true); setErr(null)
-    try {
-      const [empSnap, advSnap, loanSnap] = await Promise.all([
-        getDocs(collection(kasiFs, 'employees')),
-        getDocs(collection(kasiFs, 'advances')),
-        getDocs(collection(kasiFs, 'loans'))
-      ])
-      const emps  = empSnap.docs.map(d  => ({ _id: d.id, ...d.data() }))
-      const advs  = advSnap.docs.map(d  => ({ _id: d.id, ...d.data() }))
-      const loans = loanSnap.docs.map(d => ({ _id: d.id, ...d.data() }))
-
-      const activeAdv   = advs.filter(a  => !a.deducted && (a.amount || 0) > 0)
-      const activeLoans = loans.filter(l => (l.balance || l.remaining || 0) > 0)
-
-      const advByEmp = {}
-      activeAdv.forEach(a => { if (a.empId) advByEmp[a.empId] = (advByEmp[a.empId] || 0) + (a.amount || 0) })
-
-      let totalDaily = 0
-      emps.forEach(e => { if (e.salary) totalDaily += e.salary / 26 })
-
-      setData({ emps, activeAdv, activeLoans, advByEmp, totalDaily })
+      setData({ rows, totalGross, totalNet, totalAdv, month: `${['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][mo-1]} ${yr}` })
     } catch (e) { setErr(e.message) }
     setLoading(false)
   }, [])
@@ -153,27 +148,49 @@ function KasiCard() {
 
   return (
     <Card
-      title="Kasi Varanasi Payroll" sub="kasi-varanasi-payroll · Firestore"
-      badge={loading ? 'Loading…' : err ? 'Error' : (data?.emps?.length || 0) + ' staff'}
+      title="KAL Payroll — Settlement" sub={`koviloor-payroll · ${data?.month || ''}`}
+      badge={loading ? 'Loading…' : err ? 'Error' : (data?.rows?.length || 0) + ' staff'}
       badgeType={loading ? 'info' : err ? 'err' : 'ok'}
       error={err}
     >
-      <div className="metrics">
-        <Metric label="Employees"      value={loading ? '…' : data?.emps?.length ?? '—'} />
-        <Metric label="Active advances" value={loading ? '…' : data?.activeAdv?.length ?? '—'} />
-        <Metric label="Active loans"   value={loading ? '…' : data?.activeLoans?.length ?? '—'} />
-        <Metric label="Est. daily wages" value={loading ? '…' : INR(data?.totalDaily)} />
-      </div>
+      {!loading && !err && data && (
+        <div className="metrics">
+          <Metric label="Total gross"    value={INR(data.totalGross)} />
+          <Metric label="Total advances" value={INR(data.totalAdv)} />
+          <Metric label="Net payable"    value={INR(data.totalNet)} />
+          <Metric label="Staff"          value={data.rows.length} />
+        </div>
+      )}
       <div className="table-wrap">
-        <table>
-          <thead><tr><th>Employee</th><th>Daily rate (÷26)</th><th>Advance pending</th></tr></thead>
+        <table className="settlement-table">
+          <thead>
+            <tr>
+              <th>Employee</th>
+              <th>Days</th>
+              <th>Base Sal</th>
+              <th>Coy OT</th>
+              <th>Party OT</th>
+              <th>Convey</th>
+              <th>Gross</th>
+              <th>Advance</th>
+              <th>Loan Ded</th>
+              <th className="net-col">Net Pay</th>
+            </tr>
+          </thead>
           <tbody>
-            {loading && <tr className="info-row"><td colSpan={3}>Fetching…</td></tr>}
-            {!loading && !err && data?.emps?.slice(0, 15).map((e, i) => (
+            {loading && <tr className="info-row"><td colSpan={10}>Fetching…</td></tr>}
+            {!loading && !err && data?.rows?.map((r, i) => (
               <tr key={i}>
-                <td>{e.name || e._id}</td>
-                <td>{e.salary ? INR(e.salary / 26) : '—'}</td>
-                <td>{data.advByEmp[e._id] > 0 ? INR(data.advByEmp[e._id]) : '—'}</td>
+                <td>{r.name}</td>
+                <td style={{textAlign:'center'}}>{r.days || '—'}</td>
+                <td>{r.baseSal > 0 ? INR(r.baseSal) : '—'}</td>
+                <td style={{color: r.coyOt > 0 ? '#d4850b' : 'inherit'}}>{r.coyOt > 0 ? INR(r.coyOt) : '-'}</td>
+                <td>{r.partyOt > 0 ? INR(r.partyOt) : '-'}</td>
+                <td>{r.conv > 0 ? INR(r.conv) : '-'}</td>
+                <td style={{fontWeight:500}}>{INR(r.gross)}</td>
+                <td style={{color: r.adv > 0 ? '#c94040' : 'inherit'}}>{r.adv > 0 ? `(${INR(r.adv)})` : '-'}</td>
+                <td style={{color: r.loanDed > 0 ? '#c94040' : 'inherit'}}>{r.loanDed > 0 ? `(${INR(r.loanDed)})` : '-'}</td>
+                <td style={{fontWeight:600, color: r.netPay < 0 ? '#c94040' : '#2e7d32'}}>{INR(r.netPay)}</td>
               </tr>
             ))}
           </tbody>
@@ -183,7 +200,106 @@ function KasiCard() {
   )
 }
 
-// ── ANNAKSHETRA BILLS ──
+// -- KASI PAYROLL DAILY SHEET --
+function KasiCard() {
+  const [data, setData] = useState(null)
+  const [err, setErr] = useState(null)
+  const [loading, setLoading] = useState(true)
+  const mo = today.getMonth() + 1
+  const yr = today.getFullYear()
+  const daysInMonth = new Date(yr, mo, 0).getDate()
+  const dayNums = Array.from({ length: daysInMonth }, (_, i) => i + 1)
+  const monthLabel = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"][mo-1] + " " + yr
+  const previewDays = dayNums.slice(0, 10)
+
+  const load = useCallback(async () => {
+    setLoading(true); setErr(null)
+    try {
+      const [empSnap, attSnap] = await Promise.all([
+        getDocs(collection(kasiFs, "employees")),
+        getDocs(collection(kasiFs, "attendance"))
+      ])
+      const emps = empSnap.docs.map(d => ({ _id: d.id, ...d.data() }))
+      const moStr = String(mo).padStart(2,"0")
+      const attMap = {}
+      attSnap.docs.forEach(d => {
+        const a = d.data()
+        const aDate = a.date || ""
+        if (!aDate.startsWith(yr + "-" + moStr)) return
+        const day = parseInt(aDate.slice(8, 10))
+        if (!attMap[a.empId]) attMap[a.empId] = {}
+        attMap[a.empId][day] = { hrs: a.hours || a.hrs || 9, amt: a.amount || a.dailyWage || 0 }
+      })
+      const rows = emps.map(e => {
+        const eid = e._id
+        const ctc = e.salary || e.ctc || 0
+        const dailyRate = Math.round(ctc / 26)
+        const days = attMap[eid] || {}
+        let totalHrs = 0, totalAmt = 0
+        dayNums.forEach(d => { if (days[d]) { totalHrs += days[d].hrs || 9; totalAmt += days[d].amt || dailyRate } })
+        return { name: e.name || eid, ctc, dailyRate, days, totalHrs, totalAmt }
+      })
+      const grandTotal = rows.reduce((s, r) => s + r.totalAmt, 0)
+      setData({ rows, grandTotal, count: emps.length })
+    } catch (e) { setErr(e.message) }
+    setLoading(false)
+  }, [])
+
+  useEffect(() => { load() }, [load])
+
+  return (
+    <Card
+      title="Kasi Kitchen - Daily Salary Sheet" sub={"kasi-varanasi-payroll - " + monthLabel}
+      badge={loading ? "Loading..." : err ? "Error" : (data?.count || 0) + " staff"}
+      badgeType={loading ? "info" : err ? "err" : "ok"}
+      error={err}
+    >
+      {!loading && !err && data && (
+        <div className="metrics">
+          <Metric label="Staff" value={data.count} />
+          <Metric label={monthLabel + " total"} value={INR(data.grandTotal)} />
+        </div>
+      )}
+      <div className="table-wrap">
+        <table className="settlement-table">
+          <thead>
+            <tr>
+              <th style={{minWidth:120}}>Employee</th>
+              <th>CTC</th>
+              {previewDays.map(d => <th key={d} style={{minWidth:36,textAlign:"center"}}>{d}</th>)}
+              <th style={{color:"#888"}}>...</th>
+              <th>Hrs</th>
+              <th className="net-col">Total</th>
+            </tr>
+          </thead>
+          <tbody>
+            {loading && <tr className="info-row"><td colSpan={previewDays.length + 5}>Fetching...</td></tr>}
+            {!loading && !err && data?.rows?.map((r, i) => (
+              <tr key={i}>
+                <td>{r.name}</td>
+                <td style={{fontSize:11,color:"#888"}}>{r.ctc >= 1000 ? Math.round(r.ctc/1000)+"k" : r.ctc}</td>
+                {previewDays.map(d => (
+                  <td key={d} style={{textAlign:"center",fontSize:11}}>
+                    {r.days[d] ? <span>{r.days[d].amt > 0 ? Math.round(r.days[d].amt) : r.dailyRate}</span> : <span style={{color:"#ccc"}}>-</span>}
+                  </td>
+                ))}
+                <td style={{color:"#aaa",fontSize:11}}>...</td>
+                <td style={{textAlign:"center"}}>{r.totalHrs > 0 ? r.totalHrs : "-"}</td>
+                <td style={{fontWeight:600,color:"#2e7d32"}}>{r.totalAmt > 0 ? INR(r.totalAmt) : "-"}</td>
+              </tr>
+            ))}
+            {!loading && !err && data?.rows?.length === 0 && (
+              <tr className="info-row"><td colSpan={previewDays.length + 5}>No data for this month</td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+      <div style={{fontSize:11,color:"#aaa",marginTop:6}}>Days 1-10 shown - Full sheet at kasi-payroll.vercel.app</div>
+    </Card>
+  )
+}
+
+// -- ANNAKSHETRA BILLS --
 function AKCard() {
   const [data, setData] = useState(null)
   const [err, setErr] = useState(null)
@@ -193,18 +309,34 @@ function AKCard() {
     setLoading(true); setErr(null)
     try {
       const [billSnap, subSnap] = await Promise.all([
-        getDocs(query(collection(akFs, 'ak_bills'), orderBy('billDate', 'desc'), limit(200))),
+        getDocs(query(collection(akFs, 'ak_bills'), orderBy('billDate', 'desc'), limit(300))),
         getDocs(collection(akFs, 'ak_submissions'))
       ])
       const bills = billSnap.docs.map(d => ({ _id: d.id, ...d.data() }))
-      const subs  = subSnap.size
+      bills.sort((a, b) => (b.billDate || '').localeCompare(a.billDate || ''))
+
+      const subs = subSnap.docs.map(d => ({ _id: d.id, ...d.data() }))
+      const subMap = {}
+      subs.forEach(s => { if (s._id) subMap[s._id] = s.submissionRef || s.ref || s._id.slice(0,8) })
 
       const pending  = bills.filter(b => b.status === 'submitted' || b.status === 'pending')
-      const approved = bills.filter(b => b.status === 'approved').length
+      const approved = bills.filter(b => b.status === 'approved')
       const totalAmt = bills.reduce((s, b) => s + (b.amount || 0), 0)
       const pendAmt  = pending.reduce((s, b) => s + (b.amount || 0), 0)
+      const appAmt   = approved.reduce((s, b) => s + (b.amount || 0), 0)
+      const lastDate = bills.length > 0 ? bills[0].billDate : null
 
-      setData({ bills, pending, approved, totalAmt, pendAmt, subs })
+      // vendor-wise summary
+      const vendorMap = {}
+      bills.forEach(b => {
+        const v = b.vendorName || 'Other'
+        if (!vendorMap[v]) vendorMap[v] = { count: 0, amt: 0, pending: 0 }
+        vendorMap[v].count++
+        vendorMap[v].amt += b.amount || 0
+        if (b.status === 'submitted' || b.status === 'pending') vendorMap[v].pending++
+      })
+
+      setData({ bills, pending, approved: approved.length, appAmt, totalAmt, pendAmt, subMap, lastDate, vendorMap, subCount: subs.length })
     } catch (e) { setErr(e.message) }
     setLoading(false)
   }, [])
@@ -213,46 +345,66 @@ function AKCard() {
 
   return (
     <Card
-      title="Annakshetra Bills" sub="annakshetra-bills · Firestore"
-      badge={loading ? 'Loading…' : err ? 'Error' : (data?.pending?.length || 0) + ' pending'}
+      title="Annakshetra Bills Ledger" sub={"annakshetra-bills - Last entry: " + (data?.lastDate || '...')}
+      badge={loading ? 'Loading...' : err ? 'Error' : (data?.pending?.length || 0) + ' pending'}
       badgeType={loading ? 'info' : err ? 'err' : (data?.pending?.length > 0 ? 'warn' : 'ok')}
       error={err}
     >
       <div className="metrics">
-        <Metric label="Total bills"     value={loading ? '…' : data?.bills?.length ?? '—'} />
-        <Metric label="Pending approval" value={loading ? '…' : data?.pending?.length ?? '—'} />
-        <Metric label="Approved"        value={loading ? '…' : data?.approved ?? '—'} />
-        <Metric label="Total amount"    value={loading ? '…' : INR(data?.totalAmt)} />
-        <Metric label="Pending amount"  value={loading ? '…' : INR(data?.pendAmt)} />
-        <Metric label="Submissions"     value={loading ? '…' : data?.subs ?? '—'} />
+        <Metric label="Total bills"      value={loading ? '...' : data?.bills?.length ?? '-'} />
+        <Metric label="Pending approval" value={loading ? '...' : data?.pending?.length ?? '-'} />
+        <Metric label="Approved"         value={loading ? '...' : data?.approved ?? '-'} />
+        <Metric label="Total amount"     value={loading ? '...' : INR(data?.totalAmt)} />
+        <Metric label="Pending amount"   value={loading ? '...' : INR(data?.pendAmt)} />
+        <Metric label="Approved amount"  value={loading ? '...' : INR(data?.appAmt)} />
+        <Metric label="Submissions"      value={loading ? '...' : data?.subCount ?? '-'} />
       </div>
+
+      <div style={{fontSize:12,fontWeight:500,color:'#555',margin:'10px 0 6px'}}>Bills ledger (latest first)</div>
       <div className="table-wrap">
-        <table>
-          <thead><tr><th>Bill no</th><th>Date</th><th>Vendor</th><th>Category</th><th>Amount</th><th>Status</th></tr></thead>
+        <table className="settlement-table">
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>Vendor</th>
+              <th>Category</th>
+              <th>Bill No</th>
+              <th>Bill Date</th>
+              <th>Amount</th>
+              <th>Status</th>
+              <th>Submission</th>
+            </tr>
+          </thead>
           <tbody>
-            {loading && <tr className="info-row"><td colSpan={6}>Fetching…</td></tr>}
-            {!loading && !err && data?.bills?.slice(0, 15).map((b, i) => {
-              const st = b.status || '—'
+            {loading && <tr className="info-row"><td colSpan={8}>Fetching...</td></tr>}
+            {!loading && !err && data?.bills?.slice(0, 25).map((b, i) => {
+              const st = b.status || '-'
               const bc = st === 'approved' ? 'ok' : (st === 'submitted' || st === 'pending') ? 'warn' : 'info'
+              const subRef = b.submissionId ? (data.subMap[b.submissionId] || b.submissionRef || '-') : '-'
               return (
                 <tr key={i}>
-                  <td>{b.billNo || '—'}</td>
-                  <td>{b.billDate || '—'}</td>
-                  <td>{b.vendorName || '—'}</td>
-                  <td>{b.categoryName || '—'}</td>
-                  <td>₹{(b.amount || 0).toLocaleString('en-IN')}</td>
-                  <td><span className={`badge badge-${bc}`}>{st}</span></td>
+                  <td style={{color:'#aaa',fontSize:11}}>{i+1}</td>
+                  <td>{b.vendorName || '-'}</td>
+                  <td style={{color:'#888'}}>{b.categoryName || '-'}</td>
+                  <td style={{fontFamily:'monospace'}}>{b.billNo || '-'}</td>
+                  <td>{b.billDate || '-'}</td>
+                  <td style={{fontWeight:500}}>Rs.{(b.amount || 0).toLocaleString('en-IN')}</td>
+                  <td><span className={'badge badge-' + bc}>{st}</span></td>
+                  <td style={{color:'#888',fontSize:11}}>{subRef}</td>
                 </tr>
               )
             })}
           </tbody>
         </table>
       </div>
+      {!loading && data?.bills?.length > 25 && (
+        <div style={{fontSize:11,color:'#aaa',marginTop:6}}>Showing 25 of {data.bills.length} bills - Full ledger at annakshetra-bills.vercel.app</div>
+      )}
     </Card>
   )
 }
 
-// ── PROPERTY ──
+// -- PROPERTY --
 function PropCard() {
   const [data, setData] = useState(null)
   const [err, setErr] = useState(null)
@@ -272,17 +424,35 @@ function PropCard() {
       const revList  = Object.entries(revs).map(([k, v])  => ({ id: k, ...(typeof v === 'object' ? v : {}) }))
 
       const propMap = {}
-      propList.forEach(p => propMap[p.id] = p.name || p.title || p.id)
+      propList.forEach(p => propMap[p.id] = p)
 
       const todayRevs = revList.filter(r => (r.date || r.createdAt || '').slice(0, 10) === todayStr)
       const monthRevs = revList.filter(r => (r.date || r.createdAt || '').slice(0, 7) === monthStr)
       const todayTotal = todayRevs.reduce((s, r) => s + (r.amount || r.revenue || 0), 0)
       const monthTotal = monthRevs.reduce((s, r) => s + (r.amount || r.revenue || 0), 0)
 
-      const arrearList = propList.filter(p => (p.arrears || p.balance || p.due || p.arrear || 0) > 0)
-      const totalArr   = arrearList.reduce((s, p) => s + (p.arrears || p.balance || p.due || p.arrear || 0), 0)
+      // Revenue entries by property for today
+      const todayByProp = {}
+      todayRevs.forEach(r => {
+        const pid = r.propertyId || r.propId || r.property
+        if (pid) { todayByProp[pid] = (todayByProp[pid] || 0) + (r.amount || r.revenue || 0) }
+      })
 
-      setData({ propList, todayRevs, monthTotal, todayTotal, totalArr, arrearList, propMap })
+      // Arrears - from property record (arrears/unpaidMonths/balance fields)
+      const arrearList = propList
+        .filter(p => (p.arrears || p.arrearAmount || p.unpaid || p.balance || p.due || 0) > 0)
+        .map(p => {
+          const arrAmt = p.arrears || p.arrearAmount || p.unpaid || p.balance || p.due || 0
+          const expRev = p.expectedRevenue || p.monthlyRent || p.rent || p.amount || 0
+          const months = expRev > 0 ? Math.round(arrAmt / expRev) : null
+          return { ...p, arrAmt, expRev, months }
+        })
+        .sort((a, b) => b.arrAmt - a.arrAmt)
+
+      const totalArr = arrearList.reduce((s, p) => s + p.arrAmt, 0)
+      const withArrears = arrearList.length
+
+      setData({ propList, todayRevs, todayByProp, monthTotal, todayTotal, totalArr, arrearList, withArrears, propMap })
     } catch (e) { setErr(e.message) }
     setLoading(false)
   }, [])
@@ -291,62 +461,82 @@ function PropCard() {
 
   return (
     <Card
-      title="Koviloor Property" sub="koviloor-property · Realtime DB"
-      badge={loading ? 'Loading…' : err ? 'Error' : (data?.propList?.length || 0) + ' properties'}
+      title="Koviloor Property - Arrears Report" sub="koviloor-property - Realtime DB"
+      badge={loading ? 'Loading...' : err ? 'Error' : (data?.propList?.length || 0) + ' properties'}
       badgeType={loading ? 'info' : err ? 'err' : 'ok'}
       error={err}
     >
       <div className="metrics">
-        <Metric label="Properties"    value={loading ? '…' : data?.propList?.length ?? '—'} />
-        <Metric label="Today's revenue" value={loading ? '…' : INR(data?.todayTotal)} />
-        <Metric label="This month"    value={loading ? '…' : INR(data?.monthTotal)} />
-        <Metric label="Arrears"       value={loading ? '…' : INR(data?.totalArr)} />
+        <Metric label="Total properties"  value={loading ? '...' : data?.propList?.length ?? '-'} />
+        <Metric label="With arrears"      value={loading ? '...' : data?.withArrears ?? '-'} />
+        <Metric label="Total arrears"     value={loading ? '...' : INR(data?.totalArr)} />
+        <Metric label="Today's revenue"   value={loading ? '...' : INR(data?.todayTotal)} />
+        <Metric label="This month"        value={loading ? '...' : INR(data?.monthTotal)} />
       </div>
-      <div className="two-col">
-        <div>
-          <div className="sub-title">Today's entries</div>
-          <div className="table-wrap">
-            <table>
-              <thead><tr><th>Property</th><th>Amount</th><th>Note</th></tr></thead>
-              <tbody>
-                {loading && <tr className="info-row"><td colSpan={3}>Fetching…</td></tr>}
-                {!loading && !err && (data?.todayRevs?.length > 0
-                  ? data.todayRevs.map((r, i) => (
-                      <tr key={i}>
-                        <td>{data.propMap[r.propertyId || r.propId] || r.propertyId || '—'}</td>
-                        <td>{INR(r.amount || r.revenue || 0)}</td>
-                        <td>{r.note || r.description || '—'}</td>
-                      </tr>
-                    ))
-                  : <tr className="info-row"><td colSpan={3}>No entries today</td></tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-        </div>
-        <div>
-          <div className="sub-title">Arrears statement</div>
-          <div className="table-wrap">
-            <table>
-              <thead><tr><th>Property</th><th>Due</th></tr></thead>
-              <tbody>
-                {loading && <tr className="info-row"><td colSpan={2}>Fetching…</td></tr>}
-                {!loading && !err && (data?.arrearList?.length > 0
-                  ? data.arrearList.slice(0, 10).map((p, i) => {
-                      const due = p.arrears || p.balance || p.due || p.arrear || 0
-                      return (
-                        <tr key={i}>
-                          <td><span className={`dot ${due > 10000 ? 'dot-red' : 'dot-amber'}`}></span>{p.name || p.title || p.id}</td>
-                          <td>{INR(due)}</td>
-                        </tr>
-                      )
-                    })
-                  : <tr className="info-row"><td colSpan={2}>No arrears on record</td></tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-        </div>
+
+      <div style={{fontSize:12,fontWeight:500,color:'#555',margin:'10px 0 6px'}}>Today's revenue entries</div>
+      <div className="table-wrap" style={{marginBottom:16}}>
+        <table className="settlement-table">
+          <thead><tr><th>Property</th><th>Location</th><th>Amount collected</th><th>Note</th></tr></thead>
+          <tbody>
+            {loading && <tr className="info-row"><td colSpan={4}>Fetching...</td></tr>}
+            {!loading && !err && (data?.todayRevs?.length > 0
+              ? data.todayRevs.map((r, i) => {
+                  const pid = r.propertyId || r.propId || r.property
+                  const prop = data.propMap[pid] || {}
+                  return (
+                    <tr key={i}>
+                      <td>{prop.name || pid || '-'}</td>
+                      <td style={{color:'#888'}}>{prop.location || prop.city || '-'}</td>
+                      <td style={{fontWeight:500,color:'#2e7d32'}}>{INR(r.amount || r.revenue || 0)}</td>
+                      <td style={{color:'#888',fontSize:11}}>{r.note || r.description || '-'}</td>
+                    </tr>
+                  )
+                })
+              : <tr className="info-row"><td colSpan={4}>No revenue entries today</td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+
+      <div style={{fontSize:12,fontWeight:500,color:'#c62828',margin:'10px 0 6px'}}>
+        Arrears statement — {loading ? '...' : data?.withArrears} properties | {loading ? '...' : INR(data?.totalArr)} total
+      </div>
+      <div className="table-wrap">
+        <table className="settlement-table">
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>Property Name</th>
+              <th>Location</th>
+              <th>Expected Rev</th>
+              <th>Frequency</th>
+              <th>Arrears Amount</th>
+              <th>Months unpaid</th>
+              <th>Since</th>
+            </tr>
+          </thead>
+          <tbody>
+            {loading && <tr className="info-row"><td colSpan={8}>Fetching...</td></tr>}
+            {!loading && !err && data?.arrearList?.length === 0 && (
+              <tr className="info-row"><td colSpan={8}>No arrears on record</td></tr>
+            )}
+            {!loading && !err && data?.arrearList?.map((p, i) => (
+              <tr key={i}>
+                <td style={{color:'#aaa',fontSize:11}}>{i+1}</td>
+                <td style={{fontWeight:500}}>{p.name || p.title || p.id}</td>
+                <td style={{color:'#888'}}>{p.location || p.city || '-'}</td>
+                <td>{p.expRev > 0 ? INR(p.expRev) : '-'}</td>
+                <td><span className="badge badge-info" style={{fontSize:10}}>{p.frequency || p.type || 'Monthly'}</span></td>
+                <td style={{fontWeight:600,color:'#c62828'}}>{INR(p.arrAmt)}</td>
+                <td style={{textAlign:'center',color: p.months > 3 ? '#c62828' : '#d4850b'}}>
+                  {p.months ? p.months + ' mo' : '-'}
+                </td>
+                <td style={{color:'#888',fontSize:11}}>{p.arrearSince || p.since || p.fromDate || '-'}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
       </div>
     </Card>
   )
