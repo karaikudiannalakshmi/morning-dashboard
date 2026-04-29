@@ -64,6 +64,8 @@ function KalCard() {
       const mo = today.getMonth() + 1
       const daysInMonth = new Date(yr, mo, 0).getDate()
 
+      // emps is array-like object with numeric keys 0,1,2...
+      // salary field is 'rate', employee id is 'id' (numeric string)
       const emps = d.emps ? Object.values(d.emps).filter(Boolean) : []
 
       // Attendance: key format is att/2026_3/empId_day: 1
@@ -97,15 +99,30 @@ function KalCard() {
         })
       }
 
-      // Advances this month
-      const advs = d.adv ? Object.values(d.adv).filter(Boolean) : []
+      // Advances: keyed by empId, contains month-keyed entries
       const advByEmp = {}
-      advs.forEach(a => {
-        if (!a.empId) return
-        const aMo = a.month || a.mon
-        if (aMo && Number(aMo) !== mo) return
-        advByEmp[a.empId] = (advByEmp[a.empId] || 0) + (a.amount || 0)
-      })
+      if (d.adv) {
+        Object.entries(d.adv).forEach(([empId, advData]) => {
+          if (!advData || typeof advData !== 'object') return
+          // Check if it's a direct amount or month-keyed
+          if (typeof advData.amount === 'number') {
+            // direct entry with empId and month
+            if (advData.month === mo || advData.month === String(mo)) {
+              advByEmp[advData.empId || empId] = (advByEmp[advData.empId || empId] || 0) + advData.amount
+            }
+          } else {
+            // could be array of advance entries
+            Object.values(advData).forEach(a => {
+              if (!a || typeof a !== 'object') return
+              const aMo = a.month || a.mon
+              if (String(aMo) === String(mo)) {
+                const aid = a.empId || empId
+                advByEmp[aid] = (advByEmp[aid] || 0) + (a.amount || 0)
+              }
+            })
+          }
+        })
+      }
 
       // Loans deduction this month
       const loans = d.loan ? Object.values(d.loan).filter(Boolean) : []
@@ -115,25 +132,25 @@ function KalCard() {
         loanByEmp[l.empId] = (loanByEmp[l.empId] || 0) + (l.emi || l.deduction || 0)
       })
 
-      // Conveyance
+      // Conveyance: stored as conveyDay on each employee record * days worked
       const convByEmp = {}
-      if (d.conv) {
-        Object.values(d.conv).filter(Boolean).forEach(c => {
-          if (c.empId) convByEmp[c.empId] = (convByEmp[c.empId] || 0) + (c.amount || 0)
-        })
-      }
+      // Will be computed per-emp in row building using e.conveyDay
 
       // Build settlement rows
       const rows = emps.map(e => {
         const eid = e.id || e.empId || ''
         const days = daysByEmp[eid] || 0
-        const baseSal = e.type === 'fixed' ? (e.salary || 0) :
-          e.type === 'monthly' ? Math.round((e.salary || 0) * days / daysInMonth) :
-          e.type === 'cooking' ? Math.round((e.salary || 0) * days / daysInMonth) :
-          Math.round((e.salary || 0) * days / daysInMonth)
+        const empRate = e.rate || e.salary || 0
+        // cooking: rate is daily rate * days
+        // monthly: rate is monthly salary / 26 * days
+        // fixed: full monthly amount regardless of days
+        const baseSal = e.type === 'fixed' ? empRate :
+          e.type === 'cooking' ? empRate * days :
+          e.type === 'monthly' ? Math.round(empRate / 26 * days) :
+          Math.round(empRate / 26 * days)
         const coyOt = coyOtByEmp[eid] || 0
         const partyOt = partyOtByEmp[eid] || 0
-        const conv = convByEmp[eid] || 0
+        const conv = (e.conveyDay || 0) * days
         const gross = baseSal + coyOt + partyOt + conv
         const adv = advByEmp[eid] || 0
         const loanDed = loanByEmp[eid] || 0
@@ -221,28 +238,37 @@ function KasiCard() {
   const load = useCallback(async () => {
     setLoading(true); setErr(null)
     try {
+      const moStr = String(mo).padStart(2, "0")
+      const monthDocId = yr + "-" + moStr
+      // Structure: attendance/{2026-04}/employees/{empId}
       const [empSnap, attSnap] = await Promise.all([
         getDocs(collection(kasiFs, "employees")),
-        getDocs(collection(kasiFs, "attendance"))
+        getDocs(collection(kasiFs, "attendance", monthDocId, "employees"))
       ])
       const emps = empSnap.docs.map(d => ({ _id: d.id, ...d.data() }))
-      const moStr = String(mo).padStart(2,"0")
       const attMap = {}
-      attSnap.docs.forEach(d => {
-        const a = d.data()
-        const aDate = a.date || ""
-        if (!aDate.startsWith(yr + "-" + moStr)) return
-        const day = parseInt(aDate.slice(8, 10))
-        if (!attMap[a.empId]) attMap[a.empId] = {}
-        attMap[a.empId][day] = { hrs: a.hours || a.hrs || 9, amt: a.amount || a.dailyWage || 0 }
+      // Structure: doc.id = empId, doc.data() = { hours: { "11": 9, "12": 9, ... } }
+      attSnap.docs.forEach(doc => {
+        const empId = doc.id
+        const data = doc.data()
+        attMap[empId] = {}
+        const hoursMap = data.hours || {}
+        Object.entries(hoursMap).forEach(([day, hrs]) => {
+          const d = parseInt(day)
+          if (!isNaN(d) && d >= 1 && d <= 31) {
+            attMap[empId][d] = { hrs: Number(hrs) || 9, amt: 0 }
+          }
+        })
       })
       const rows = emps.map(e => {
         const eid = e._id
         const ctc = e.salary || e.ctc || 0
         const dailyRate = Math.round(ctc / 26)
+        const hourlyRate = ctc / 26 / 9
         const days = attMap[eid] || {}
-        let totalHrs = 0, totalAmt = 0
-        dayNums.forEach(d => { if (days[d]) { totalHrs += days[d].hrs || 9; totalAmt += days[d].amt || dailyRate } })
+        let totalHrs = 0
+        dayNums.forEach(d => { if (days[d]) { totalHrs += days[d].hrs || 9 } })
+        const totalAmt = Math.round(totalHrs * hourlyRate)
         return { name: e.name || eid, ctc, dailyRate, days, totalHrs, totalAmt }
       })
       const grandTotal = rows.reduce((s, r) => s + r.totalAmt, 0)
@@ -471,16 +497,40 @@ function PropCard() {
         if (pid) { todayByProp[pid] = (todayByProp[pid] || 0) + (r.amount || r.revenue || 0) }
       })
 
-      // Arrears using exact Firebase fields: existing_arrears, expected_revenue
+      // Compute arrears: expected_revenue * months_since_arrears_start - actual_payments
+      // Also use existing_arrears as stored value
+      const revByProp = {}
+      revList.forEach(r => {
+        const pid = r.propertyId || r.propId || r.property
+        if (pid) revByProp[pid] = (revByProp[pid] || 0) + (r.amount || r.revenue || 0)
+      })
+
       const arrearList = propList
-        .filter(p => (p.existing_arrears || 0) > 0)
-        .map(p => ({
-          ...p,
-          arrAmt: p.existing_arrears || 0,
-          expRev: p.expected_revenue || 0,
-          freq: p.revenue_frequency || "Monthly",
-          since: p.arrears_start_month || "-"
-        }))
+        .map(p => {
+          const expRev = p.expected_revenue || 0
+          const existingArr = p.existing_arrears || 0
+          const since = p.arrears_start_month || null
+          let arrAmt = existingArr
+
+          // Calculate computed arrears from arrears_start_month to now
+          if (since && expRev > 0) {
+            const [sy, sm] = since.split('-').map(Number)
+            const totalMonths = (yr - sy) * 12 + (mo - sm)
+            const expectedTotal = expRev * Math.max(totalMonths, 0)
+            const paid = revByProp[p.id] || 0
+            const computed = Math.max(expectedTotal - paid, 0)
+            arrAmt = computed > 0 ? computed : existingArr
+          }
+
+          return {
+            ...p,
+            arrAmt,
+            expRev,
+            freq: p.revenue_frequency || 'Monthly',
+            since: since || '-'
+          }
+        })
+        .filter(p => p.arrAmt > 0)
         .sort((a, b) => b.arrAmt - a.arrAmt)
 
       const totalArr = arrearList.reduce((s, p) => s + p.arrAmt, 0)
