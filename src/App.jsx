@@ -469,6 +469,9 @@ function PropCard() {
   const [err, setErr] = useState(null)
   const [loading, setLoading] = useState(true)
 
+  const yr = today.getFullYear()
+  const mo = today.getMonth() + 1
+
   const load = useCallback(async () => {
     setLoading(true); setErr(null)
     try {
