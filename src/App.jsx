@@ -66,28 +66,34 @@ function KalCard() {
 
       const emps = d.emps ? Object.values(d.emps).filter(Boolean) : []
 
-      // Attendance: count present days this month per emp
-      const attNode = d.att ? (d.att[yr] ? (d.att[yr][mo] || {}) : {}) : {}
+      // Attendance: key format is att/2026_3/empId_day: 1
+      const attKey = yr + '_' + mo
+      const attNode = d.att ? (d.att[attKey] || {}) : {}
       const daysByEmp = {}
-      Object.values(attNode).forEach(dayData => {
-        if (typeof dayData === 'object') {
-          Object.entries(dayData).forEach(([empId, val]) => {
-            if (val === 1 || val === 'P' || val === true)
-              daysByEmp[empId] = (daysByEmp[empId] || 0) + 1
-          })
+      Object.entries(attNode).forEach(([key, val]) => {
+        if (val === 1 || val === true) {
+          // key format: empId_day e.g. 1772872840230_15
+          const lastUnderscore = key.lastIndexOf('_')
+          if (lastUnderscore > 0) {
+            const empId = key.slice(0, lastUnderscore)
+            daysByEmp[empId] = (daysByEmp[empId] || 0) + 1
+          }
         }
       })
 
-      // OT: company OT and party OT per emp this month
+      // OT: otime node keyed by empId, contains coy/party amounts
       const coyOtByEmp = {}
       const partyOtByEmp = {}
       if (d.otime) {
-        Object.values(d.otime).filter(Boolean).forEach(ot => {
-          if (!ot.empId) return
-          const otMo = ot.month || ot.mon
-          if (otMo && Number(otMo) !== mo) return
-          if (ot.type === 'company' || ot.type === 'coy') coyOtByEmp[ot.empId] = (coyOtByEmp[ot.empId] || 0) + (ot.amount || ot.hrs || 0)
-          if (ot.type === 'party') partyOtByEmp[ot.empId] = (partyOtByEmp[ot.empId] || 0) + (ot.amount || ot.hrs || 0)
+        Object.entries(d.otime).forEach(([empId, otData]) => {
+          if (!otData || typeof otData !== 'object') return
+          // Check month key
+          const moKey = yr + '_' + mo
+          const moData = otData[moKey] || otData[mo] || otData
+          if (moData && typeof moData === 'object') {
+            coyOtByEmp[empId] = (coyOtByEmp[empId] || 0) + (moData.coy || moData.company || moData.coyOt || 0)
+            partyOtByEmp[empId] = (partyOtByEmp[empId] || 0) + (moData.party || moData.partyOt || 0)
+          }
         })
       }
 
@@ -336,7 +342,22 @@ function AKCard() {
         if (b.status === 'submitted' || b.status === 'pending') vendorMap[v].pending++
       })
 
-      setData({ bills, pending, approved: approved.length, appAmt, totalAmt, pendAmt, subMap, lastDate, vendorMap, subCount: subs.length })
+      // category-wise summary
+      const categoryMap = {}
+      bills.forEach(b => {
+        const c = b.categoryName || 'Other'
+        if (!categoryMap[c]) categoryMap[c] = { count: 0, amt: 0, pendAmt: 0 }
+        categoryMap[c].count++
+        categoryMap[c].amt += b.amount || 0
+        if (b.status === 'submitted' || b.status === 'pending') categoryMap[c].pendAmt += b.amount || 0
+      })
+      // add pendAmt to vendorMap
+      Object.keys(vendorMap).forEach(v => { vendorMap[v].pendAmt = 0 })
+      bills.forEach(b => {
+        const v = b.vendorName || 'Other'
+        if (b.status === 'submitted' || b.status === 'pending') vendorMap[v].pendAmt = (vendorMap[v].pendAmt || 0) + (b.amount || 0)
+      })
+      setData({ bills, pending, approved: approved.length, appAmt, totalAmt, pendAmt, subMap, lastDate, vendorMap, categoryMap, subCount: subs.length })
     } catch (e) { setErr(e.message) }
     setLoading(false)
   }, [])
@@ -360,46 +381,58 @@ function AKCard() {
         <Metric label="Submissions"      value={loading ? '...' : data?.subCount ?? '-'} />
       </div>
 
-      <div style={{fontSize:12,fontWeight:500,color:'#555',margin:'10px 0 6px'}}>Bills ledger (latest first)</div>
-      <div className="table-wrap">
+      <div style={{fontSize:12,fontWeight:500,color:'#555',margin:'10px 0 6px'}}>Vendor-wise summary</div>
+      <div className="table-wrap" style={{marginBottom:16}}>
         <table className="settlement-table">
           <thead>
             <tr>
-              <th>#</th>
-              <th>Vendor</th>
-              <th>Category</th>
-              <th>Bill No</th>
-              <th>Bill Date</th>
-              <th>Amount</th>
-              <th>Status</th>
-              <th>Submission</th>
+              <th>#</th><th>Vendor</th><th>Bills</th><th>Total Amount</th><th>Pending</th><th>Pending Amount</th>
             </tr>
           </thead>
           <tbody>
-            {loading && <tr className="info-row"><td colSpan={8}>Fetching...</td></tr>}
-            {!loading && !err && data?.bills?.slice(0, 25).map((b, i) => {
-              const st = b.status || '-'
-              const bc = st === 'approved' ? 'ok' : (st === 'submitted' || st === 'pending') ? 'warn' : 'info'
-              const subRef = b.submissionId ? (data.subMap[b.submissionId] || b.submissionRef || '-') : '-'
-              return (
+            {loading && <tr className="info-row"><td colSpan={6}>Fetching...</td></tr>}
+            {!loading && !err && Object.entries(data?.vendorMap || {})
+              .sort((a,b) => b[1].amt - a[1].amt)
+              .map(([vendor, v], i) => (
                 <tr key={i}>
                   <td style={{color:'#aaa',fontSize:11}}>{i+1}</td>
-                  <td>{b.vendorName || '-'}</td>
-                  <td style={{color:'#888'}}>{b.categoryName || '-'}</td>
-                  <td style={{fontFamily:'monospace'}}>{b.billNo || '-'}</td>
-                  <td>{b.billDate || '-'}</td>
-                  <td style={{fontWeight:500}}>Rs.{(b.amount || 0).toLocaleString('en-IN')}</td>
-                  <td><span className={'badge badge-' + bc}>{st}</span></td>
-                  <td style={{color:'#888',fontSize:11}}>{subRef}</td>
+                  <td style={{fontWeight:500}}>{vendor}</td>
+                  <td style={{textAlign:'center'}}>{v.count}</td>
+                  <td style={{fontWeight:500}}>₹{Math.round(v.amt).toLocaleString('en-IN')}</td>
+                  <td style={{textAlign:'center',color: v.pending > 0 ? '#d4850b' : '#2e7d32'}}>{v.pending}</td>
+                  <td style={{fontWeight:500,color: v.pendAmt > 0 ? '#c62828' : '#2e7d32'}}>
+                    {v.pendAmt > 0 ? '₹' + Math.round(v.pendAmt).toLocaleString('en-IN') : '-'}
+                  </td>
                 </tr>
-              )
-            })}
+              ))
+            }
           </tbody>
         </table>
       </div>
-      {!loading && data?.bills?.length > 25 && (
-        <div style={{fontSize:11,color:'#aaa',marginTop:6}}>Showing 25 of {data.bills.length} bills - Full ledger at annakshetra-bills.vercel.app</div>
-      )}
+      <div style={{fontSize:12,fontWeight:500,color:'#555',margin:'10px 0 6px'}}>Category-wise summary</div>
+      <div className="table-wrap">
+        <table className="settlement-table">
+          <thead>
+            <tr><th>#</th><th>Category</th><th>Bills</th><th>Total Amount</th><th>Pending Amt</th></tr>
+          </thead>
+          <tbody>
+            {!loading && !err && Object.entries(data?.categoryMap || {})
+              .sort((a,b) => b[1].amt - a[1].amt)
+              .map(([cat, v], i) => (
+                <tr key={i}>
+                  <td style={{color:'#aaa',fontSize:11}}>{i+1}</td>
+                  <td>{cat}</td>
+                  <td style={{textAlign:'center'}}>{v.count}</td>
+                  <td>₹{Math.round(v.amt).toLocaleString('en-IN')}</td>
+                  <td style={{color: v.pendAmt > 0 ? '#c62828' : '#2e7d32'}}>
+                    {v.pendAmt > 0 ? '₹' + Math.round(v.pendAmt).toLocaleString('en-IN') : '-'}
+                  </td>
+                </tr>
+              ))
+            }
+          </tbody>
+        </table>
+      </div>
     </Card>
   )
 }
@@ -438,21 +471,22 @@ function PropCard() {
         if (pid) { todayByProp[pid] = (todayByProp[pid] || 0) + (r.amount || r.revenue || 0) }
       })
 
-      // Arrears - from property record (arrears/unpaidMonths/balance fields)
+      // Arrears using exact Firebase fields: existing_arrears, expected_revenue
       const arrearList = propList
-        .filter(p => (p.arrears || p.arrearAmount || p.unpaid || p.balance || p.due || 0) > 0)
-        .map(p => {
-          const arrAmt = p.arrears || p.arrearAmount || p.unpaid || p.balance || p.due || 0
-          const expRev = p.expectedRevenue || p.monthlyRent || p.rent || p.amount || 0
-          const months = expRev > 0 ? Math.round(arrAmt / expRev) : null
-          return { ...p, arrAmt, expRev, months }
-        })
+        .filter(p => (p.existing_arrears || 0) > 0)
+        .map(p => ({
+          ...p,
+          arrAmt: p.existing_arrears || 0,
+          expRev: p.expected_revenue || 0,
+          freq: p.revenue_frequency || "Monthly",
+          since: p.arrears_start_month || "-"
+        }))
         .sort((a, b) => b.arrAmt - a.arrAmt)
 
       const totalArr = arrearList.reduce((s, p) => s + p.arrAmt, 0)
       const withArrears = arrearList.length
 
-      setData({ propList, todayRevs, todayByProp, monthTotal, todayTotal, totalArr, arrearList, withArrears, propMap })
+      setData({ propList, todayRevs, todayByProp, monthTotal, todayTotal, totalArr, arrearList, withArrears: arrearList.length, propMap })
     } catch (e) { setErr(e.message) }
     setLoading(false)
   }, [])
@@ -521,20 +555,23 @@ function PropCard() {
             {!loading && !err && data?.arrearList?.length === 0 && (
               <tr className="info-row"><td colSpan={8}>No arrears on record</td></tr>
             )}
-            {!loading && !err && data?.arrearList?.map((p, i) => (
-              <tr key={i}>
-                <td style={{color:'#aaa',fontSize:11}}>{i+1}</td>
-                <td style={{fontWeight:500}}>{p.name || p.title || p.id}</td>
-                <td style={{color:'#888'}}>{p.location || p.city || '-'}</td>
-                <td>{p.expRev > 0 ? INR(p.expRev) : '-'}</td>
-                <td><span className="badge badge-info" style={{fontSize:10}}>{p.frequency || p.type || 'Monthly'}</span></td>
-                <td style={{fontWeight:600,color:'#c62828'}}>{INR(p.arrAmt)}</td>
-                <td style={{textAlign:'center',color: p.months > 3 ? '#c62828' : '#d4850b'}}>
-                  {p.months ? p.months + ' mo' : '-'}
-                </td>
-                <td style={{color:'#888',fontSize:11}}>{p.arrearSince || p.since || p.fromDate || '-'}</td>
-              </tr>
-            ))}
+            {!loading && !err && data?.arrearList?.map((p, i) => {
+              const months = p.expRev > 0 ? Math.round(p.arrAmt / p.expRev) : null
+              return (
+                <tr key={i}>
+                  <td style={{color:'#aaa',fontSize:11}}>{i+1}</td>
+                  <td style={{fontWeight:500}}>{p.name || p.title || p.id}</td>
+                  <td style={{color:'#888'}}>{p.location || '-'}</td>
+                  <td>{p.expRev > 0 ? INR(p.expRev) : '-'}</td>
+                  <td><span className="badge badge-info" style={{fontSize:10}}>{p.freq}</span></td>
+                  <td style={{fontWeight:600,color:'#c62828'}}>{INR(p.arrAmt)}</td>
+                  <td style={{textAlign:'center',color: months > 3 ? '#c62828' : '#d4850b'}}>
+                    {months ? months + ' mo' : '-'}
+                  </td>
+                  <td style={{color:'#888',fontSize:11}}>{p.since}</td>
+                </tr>
+              )
+            })}
           </tbody>
         </table>
       </div>
