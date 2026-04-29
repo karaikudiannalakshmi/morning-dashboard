@@ -469,8 +469,54 @@ function PropCard() {
   const [err, setErr] = useState(null)
   const [loading, setLoading] = useState(true)
 
-  const yr = today.getFullYear()
-  const mo = today.getMonth() + 1
+  const getRateForMonth = (property, month) => {
+    const revisions = property.rent_revisions || []
+    const sorted = [...revisions].sort((a, b) => (a.effective || '').localeCompare(b.effective || ''))
+    let rate = property.expected_revenue || 0
+    if (sorted.length > 0) {
+      rate = property.original_rate || property.expected_revenue || 0
+      for (const rev of sorted) {
+        if ((rev.effective || '') <= month) rate = rev.amount
+      }
+    }
+    return rate
+  }
+
+  const calcArrears = (property, propRevenues) => {
+    const type = property.property_type || ''
+    const freq = property.revenue_frequency || 'Monthly'
+    if (type.includes('Agricultural')) return { amount: property.existing_arrears || 0, count: 0 }
+    if (freq !== 'Monthly') return { amount: 0, count: 0 }
+    const collected = new Set()
+    propRevenues.forEach(r => {
+      const base = (r.revenue_date || '').slice(0, 7)
+      if (!/^[0-9]{4}-[0-9]{2}$/.test(base)) return
+      const covered = parseInt(r.months_covered || 1)
+      let [y, m] = base.split('-').map(Number)
+      for (let i = 0; i < covered; i++) {
+        collected.add(y + '-' + String(m).padStart(2, '0'))
+        m++; if (m > 12) { m = 1; y++ }
+      }
+    })
+    const validDates = propRevenues
+      .map(r => (r.revenue_date || '').slice(0, 7))
+      .filter(d => /^[0-9]{4}-[0-9]{2}$/.test(d)).sort()
+    let startMonth = validDates[0] || property.arrears_start_month || null
+    if (!startMonth) return { amount: 0, count: 0 }
+    const now = new Date()
+    let cy = now.getFullYear(), cm = now.getMonth() + 1
+    if (now.getDate() < 5) { cm -= 1; if (cm === 0) { cm = 12; cy -= 1 } }
+    const upTo = cy + '-' + String(cm).padStart(2, '0')
+    let [sy, sm] = startMonth.split('-').map(Number)
+    const [ey, em] = upTo.split('-').map(Number)
+    let totalAmount = 0, count = 0
+    while (sy < ey || (sy === ey && sm <= em)) {
+      const moStr = sy + '-' + String(sm).padStart(2, '0')
+      if (!collected.has(moStr)) { totalAmount += getRateForMonth(property, moStr); count++ }
+      sm++; if (sm > 12) { sm = 1; sy++ }
+    }
+    return { amount: Math.round(totalAmount), count }
+  }
 
   const load = useCallback(async () => {
     setLoading(true); setErr(null)
@@ -481,65 +527,29 @@ function PropCard() {
       ])
       const props = propSnap.val() || {}
       const revs  = revSnap.val()  || {}
-
       const propList = Object.entries(props).map(([k, v]) => ({ id: k, ...(typeof v === 'object' ? v : { name: String(v) }) }))
       const revList  = Object.entries(revs).map(([k, v])  => ({ id: k, ...(typeof v === 'object' ? v : {}) }))
-
       const propMap = {}
       propList.forEach(p => propMap[p.id] = p)
-
-      const todayRevs = revList.filter(r => (r.date || r.createdAt || '').slice(0, 10) === todayStr)
-      const monthRevs = revList.filter(r => (r.date || r.createdAt || '').slice(0, 7) === monthStr)
-      const todayTotal = todayRevs.reduce((s, r) => s + (r.amount || r.revenue || 0), 0)
-      const monthTotal = monthRevs.reduce((s, r) => s + (r.amount || r.revenue || 0), 0)
-
-      // Revenue entries by property for today
-      const todayByProp = {}
-      todayRevs.forEach(r => {
-        const pid = r.propertyId || r.propId || r.property
-        if (pid) { todayByProp[pid] = (todayByProp[pid] || 0) + (r.amount || r.revenue || 0) }
-      })
-
-      // Compute arrears: expected_revenue * months_since_arrears_start - actual_payments
-      // Also use existing_arrears as stored value
-      const revByProp = {}
+      const revsByProp = {}
       revList.forEach(r => {
-        const pid = r.propertyId || r.propId || r.property
-        if (pid) revByProp[pid] = (revByProp[pid] || 0) + (r.amount || r.revenue || 0)
+        const pid = r.propertyId || r.propId || r.property_id
+        if (pid) { if (!revsByProp[pid]) revsByProp[pid] = []; revsByProp[pid].push(r) }
       })
-
+      const todayRevs = revList.filter(r => (r.revenue_date || r.date || '').slice(0, 10) === todayStr)
+      const monthRevs = revList.filter(r => (r.revenue_date || r.date || '').slice(0, 7) === monthStr)
+      const todayTotal = todayRevs.reduce((s, r) => s + (r.amount || 0), 0)
+      const monthTotal = monthRevs.reduce((s, r) => s + (r.amount || 0), 0)
       const arrearList = propList
         .map(p => {
-          const expRev = p.expected_revenue || 0
-          const existingArr = p.existing_arrears || 0
-          const since = p.arrears_start_month || null
-          let arrAmt = existingArr
-
-          // Calculate computed arrears from arrears_start_month to now
-          if (since && expRev > 0) {
-            const [sy, sm] = since.split('-').map(Number)
-            const totalMonths = (yr - sy) * 12 + (mo - sm)
-            const expectedTotal = expRev * Math.max(totalMonths, 0)
-            const paid = revByProp[p.id] || 0
-            const computed = Math.max(expectedTotal - paid, 0)
-            arrAmt = computed > 0 ? computed : existingArr
-          }
-
-          return {
-            ...p,
-            arrAmt,
-            expRev,
-            freq: p.revenue_frequency || 'Monthly',
-            since: since || '-'
-          }
+          const propRevs = revsByProp[p.id] || []
+          const { amount: arrAmt, count } = calcArrears(p, propRevs)
+          return { ...p, arrAmt, count, expRev: p.expected_revenue || 0, freq: p.revenue_frequency || 'Monthly', since: p.arrears_start_month || '-' }
         })
         .filter(p => p.arrAmt > 0)
         .sort((a, b) => b.arrAmt - a.arrAmt)
-
       const totalArr = arrearList.reduce((s, p) => s + p.arrAmt, 0)
-      const withArrears = arrearList.length
-
-      setData({ propList, todayRevs, todayByProp, monthTotal, todayTotal, totalArr, arrearList, withArrears: arrearList.length, propMap })
+      setData({ propList, todayRevs, monthTotal, todayTotal, totalArr, arrearList, withArrears: arrearList.length, propMap })
     } catch (e) { setErr(e.message) }
     setLoading(false)
   }, [])
